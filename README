@@ -1,0 +1,26 @@
+- What does it do
+  1. Creates basic chroot enviroment.
+  2. Installs simple executables like ls,ps,find etc with libraries into chroot env.
+  3. Installs base system packages (except documentation) into chroot (RPM;Slackware;Gentoo;Debian;Ubuntu)
+
+- Installation
+  # make install
+
+- Examples
+  Initialize basic chroot sys in current dir.
+  # mkdir /CHROOT/ && cd /CHROOT
+  # cb -c
+
+  Installs /bin/ls into current dir (chroot env), with libraries it depends on.
+  # cb -f /bin/ls
+  OR
+  # cb -f `which ls`
+
+  Show whats going to be copied into chroot 
+  from rpm package 'mysql' but dont actualy do it (simulate).
+  # cb -p mysql -pr -s
+  Installs rpm package 'mysql' into current dir.
+  # cb -p mysql -pr
+
+  Install debian package 'mysql' into current dir.
+  # cb -p mysql -pd

@@ -1,0 +1,469 @@
+#!/usr/bin/perl -w
+#
+# Author: Alen Komic, <ak47@verat.net>
+# Copyright: (c) 2004,2007 Alen Komic, <ak47@verat.net>,
+#                Belgrade, SCG
+#    This file is part of Chrootbin.
+#
+#    Chrootbin is free software; you can redistribute it and/or modify
+#    it under the terms of the GNU General Public License as published by
+#    the Free Software Foundation; either version 2 of the License, or
+#    (at your option) any later version.
+#
+#    Chrootbin is distributed in the hope that it will be useful,
+#    but WITHOUT ANY WARRANTY; without even the implied warranty of
+#    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#    GNU General Public License for more details.
+#
+#    You should have received a copy of the GNU General Public License
+#    along with Chrootbin; if not, write to the Free Software
+#    Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
+#
+##################################################################
+
+use strict;
+use File::Basename;
+use Getopt::Long;
+
+$|=1;
+
+our $version = '3.0';
+
+our %sw;
+$sw{verbose}	= 0;
+GetOptions(	'c'		=> \$sw{init},
+		'pt=s'		=> \$sw{ptype},
+		'p=s'		=> \$sw{package},
+		'f=s'		=> \$sw{file},
+		'o'		=> \$sw{override},
+		's'		=> \$sw{simulate},
+		'v+'		=> \$sw{verbose},
+		'version'	=> \$sw{version}
+);
+
+die " chrootbin,v ${version} by ak\n" if $sw{version};
+
+die "Usage: chrootbin
+	-c		Initialize chroot env in current directory (".$ENV{PWD}.")
+ 	-f <file>	Install <file> (e.g. /bin/ls) into current chroot env (".$ENV{PWD}.")
+	-p <package>	Install <package> into current chroot env (".$ENV{PWD}.")
+	-pt [rpm|slack|gentoo|debian]
+			Package type RPM/Slackware/Gentoo/(Debian,Ubuntu)
+	-s		Simulate. Don't actualy install anything
+	-o		Override libraries/binaries/modes
+	-v		Verbosity (-v = level 1;-v -v = level 2)
+	-version	Show version
+" unless ( ( $sw{ptype} && $sw{package} ) || $sw{version} || $sw{init} || $sw{file});
+
+die "You have to be root to run this.\n" unless $< eq 0 ;
+
+my $LDDBIN = "/usr/bin/ldd";
+die "${LDDBIN} missing.\n" unless ( -f $LDDBIN && -x $LDDBIN );
+
+my $FILEBIN = "/usr/bin/file";
+die "${FILEBIN} missing.\n" unless ( -f $FILEBIN && -x $FILEBIN );
+
+# Define structure
+our %struct;
+$struct{dirs} = [
+ "/bin",
+ "/sbin",
+ "/etc",
+ "/etc/rc.d",
+ "/usr",
+ "/usr/bin",
+ "/usr/sbin",
+ "/usr/lib",
+ "/usr/local",
+ "/usr/local/bin",
+ "/usr/local/sbin",
+ "/usr/local/lib",
+ "/usr/local/etc",
+ "/var",
+ "/var/log",
+ "/var/adm",
+ "/var/run",
+ "/var/empty",
+ "/var/lib",
+ "/tmp",
+ "/lib",
+ "/dev",
+ "/root",
+ "/proc",
+];
+$struct{files} = [
+ "/etc/hosts",
+ "/etc/resolv.conf",
+ "/etc/localtime",
+ "/etc/protocols",
+ "/etc/passwd",
+ "/etc/shadow",
+ "/etc/group",
+ "/etc/HOSTNAME",
+ "/etc/profile",
+ "/etc/services",
+ "/etc/ld.so.conf",
+ "/etc/ld.so.cache",
+ "/lib/libc.*",
+ "/lib/libnss_compat.*",
+ "/lib/libnss_dns.*",
+ "/lib/libnss_files.*",
+ "/lib/libnss_hesiod.*",
+ "/lib/libnss_nisplus.*",
+ "/lib/libnss_nis.*",
+ "/lib/libnsl.*",
+ "/lib/ld-*"
+];
+$struct{devices} = [
+ "/dev/null",
+ "/dev/zero",
+ "/dev/random",
+ "/dev/urandom",
+ "/dev/xconsole",
+ "/dev/console",
+ "/dev/tty10",
+ "/dev/tty"
+];
+$struct{binaries} = [
+ "bash",
+ "sh",
+ "ls",
+ "cat",
+ "cut",
+ "sed",
+ "sleep",
+ "awk",
+ "grep",
+ "egrep",
+ "mkdir",
+ "chmod",
+ "hostname",
+ "touch",
+ "chown",
+ "date",
+ "rm",
+ "tee",
+ "find",
+ "which",
+ "whereis"
+];
+
+### SUBS
+our %checked_libs;
+our $ident = "\t";
+
+sub cb_ldd {
+	my $item	= shift;
+	my $libs	= shift;
+	return(0,"Item not specified/missing/not executable") unless ($item && -f $item);
+	my @stat = cb_file($item);
+	if( $stat[1] ne 'e' && $stat[1] ne 'l' ) { return(0); }
+	open(LDD,"${LDDBIN} -v ${item} |") or return(0,$!);
+	while(<LDD>) {
+		chomp($_);
+		if( /^\s+\S+\s+\(\S+\)\s+\=\>\s+(\S+)$/ || /^\s+(\S+)\:$/ ) {	# lib => /fullpath/lib (code) || lib:
+			if( !$libs->{$1} && !exists($checked_libs{$1}) && $item ne $1 ) {
+				if( $sw{override} || ! -e "./${1}" ) {
+					$libs->{$1} = 0;
+					$libs->{$1} = 1 if -f "${1}";
+					$checked_libs{$1} = 1;
+				}
+			}
+		}
+	}
+	close(LDD);
+	return(1,$libs);
+}
+
+sub cb_collect_libs {
+	my $item	= shift;
+	my @fstat	= cb_file($item);
+	if( $fstat[1] ne 'e' && $fstat[1] ne 'l' ) { return 0; }
+	my $libs	= cb_ldd($item);
+	while(my($file,$flag) = each %$libs) {
+		@fstat = cb_file($file);
+		if( ( $fstat[1] eq 'e' || $fstat[1] eq 'l' || $fstat[1] eq 's' ) && !$libs->{$file} ) {
+			if( $fstat[1] eq 's' ) {
+				if( -e $fstat[1] ) {
+					$libs->{$fstat[1]} = 1;
+				} else {
+					$libs->{$fstat[1]} = 0;
+				}
+				$libs	= cb_ldd($fstat[2],$libs);
+			} else {
+				$libs	= cb_ldd($file,$libs);
+			}
+		} elsif( $fstat[1] eq 's' ) {
+			if( -f $fstat[2] ) {
+				$libs->{$fstat[2]} = 1;
+			} else {
+				$libs->{$fstat[2]} = 0;
+			}
+		}
+	}
+	return $libs;
+}
+
+sub cb_file {
+	my $file	= shift;
+	if( !$file ) { return(0,"Missing"); }
+	my $fileret = `${FILEBIN} $file`;
+	if( $fileret =~ /No such file or directory/ ) {
+		return(0,"Missing");
+	} elsif( $fileret =~ /ELF \S+\-bit LSB executable/ ) {
+		return(1,"e");
+	} elsif( $fileret =~ /shared object/ ) {
+		return(1,"l");
+	} elsif( $fileret =~ /symbolic link to \`(\S+)\'/ ) {
+		my $symlink	= $1;
+		my $dirname	= dirname($file);
+		if( $symlink =~ m/^\// ) {
+			return(1,"s","${symlink}");
+		} else {
+			return(1,"s","${dirname}/${symlink}");
+		}
+	} else {
+		return(1,"o");
+	}
+}
+
+sub cb_mkdir {
+	my $dir	= shift;
+
+	my (@dcs,@path);
+	# strip off leading dot and double slashes
+	$dir =~ s/^\.//g; $dir =~ s/\/\//\//g;
+
+	@dcs = split(/\//,$dir);
+	while(@dcs) {
+		my $dc = shift(@dcs);
+		push( @path, $dc );
+		if( $dc ne '' ) {
+			my $dir_to_check	= join('/',@path);
+			$dir_to_check =~ s/\/\//\//g;
+			my $mode		= '0755';
+			if( -d $dir_to_check ) { $mode = sprintf "%04o", (stat($dir_to_check))[2] & 07777; }
+			if( ! -d "./${dir_to_check}" ) {
+				if( $sw{verbose} && $sw{verbose} > 1 ) {
+					print "${ident} [E]-> mkdir/chmod ./${dir_to_check}\n"; }
+				system("mkdir -p ./${dir_to_check}") unless $sw{simulate};
+				chmod(oct($mode),"./${dir_to_check}") unless $sw{simulate};
+			} else {
+				if( $sw{override} ) {
+					if( $sw{verbose} && $sw{verbose} > 1 ) {
+						print "${ident} [E]-> chmod ./${dir_to_check}\n"; }
+					chmod(oct($mode),"./${dir_to_check}") unless $sw{simulate};
+				} else {
+					if( $sw{verbose} && $sw{verbose} > 1 ) {
+						print "${ident} [S]-> chmod ./${dir_to_check}\n"; }
+				}
+			}
+		}
+	}
+}
+
+sub cb_install {
+	my $file	= shift;
+	my $dirname	= dirname($file);
+	if( -e $file || $file =~ /\*/ ) {
+		my $lfile = "./${file}";
+		$lfile =~ s/\/\//\//g;
+		if( ! -e "${lfile}" || $sw{override} ) {
+			cb_mkdir("./${dirname}");
+			if( $sw{verbose} ) {
+				print "${ident} [I]-> ${lfile}\n"; } else { print '.'; }
+			system("cp -af ${file} ./${dirname}/") unless $sw{simulate};
+		} else {
+			if( $sw{verbose} ) {
+				print "${ident} [S]-> ${lfile}\n"; } else { print ','; }
+		}
+		my @stat = cb_file($file);
+		if( $stat[1] eq 's' && exists($stat[2]) ) {
+			$lfile = "./".$stat[2];
+			$lfile =~ s/\/\//\//g;
+			if( ! -e "./".$stat[2]."" || $sw{override} ) {
+				my $sdirname	= dirname($stat[2]);
+				cb_mkdir("./${sdirname}");
+				if( $sw{verbose} ) {
+					print "${ident} [I]-> ${lfile} (symlink <- ${file})\n"; } else { print '.'; }
+				system("cp -af ".$stat[2]." ./".dirname($stat[2])."/") unless $sw{simulate};
+				$ident = "\t\t";
+				cb_Binstall(cb_collect_libs($stat[2]));
+			} else {
+				if( $sw{verbose} ) {
+					print "${ident} [S]-> ${lfile} (symlink <- ${file})\n"; } else { print ','; }
+			}
+		} elsif( $stat[1] eq 'e' || $stat[1] eq 'l' ) {
+			$ident = "\t\t";
+			if( $file !~ /\*/ ) {
+				cb_Binstall(cb_collect_libs($file));
+			}
+		}
+	} else {
+		if( $sw{verbose} ) {
+			print "${ident} [W]-> ${file} is missing\n"; } else { print '#'; }
+	}
+}
+
+sub cb_Binstall {	# Bulk copy
+	my $files	= shift;
+	if( ! $files ) {
+		return 0;
+	} elsif( ref($files) eq 'HASH' ) {
+		while(my($file,$flag) = each %$files) {
+			cb_install($file);
+		}
+	} elsif( ref($files) eq 'ARRAY' ) {
+		foreach my $file (@$files) {
+			cb_install($file);
+		}
+	} else {
+		print "BCOPY unknown type passed\n";
+	}
+}
+
+sub cb_Pinstall {	# Install from package list
+	my $plist	= shift;
+	foreach (@$plist) {
+		chomp($_);
+		if(
+			$_ ne '' && $_ ne '/' && $_ ne '.' && $_ ne '/.' &&
+			$_ !~ m/\/doc\//i && $_ !~ m/\/docs\//i && $_ !~ m/\/man\//i
+		) {
+			if( -d $_ ) {
+				$ident = "\t";
+				cb_mkdir($_);
+			} else {
+				$ident = "\t";
+				cb_install($_);
+			}
+		}
+	}
+	return 1;
+}
+
+sub cb_which {
+	my $thing	= shift;
+	my $list	= shift;
+	my @paths	= split(/:/,$ENV{PATH});
+	my $returnage;
+	foreach my $path (@paths) {
+		if( -e "${path}/${thing}" && -x "${path}/${thing}" ) {
+			if( $list ) { $returnage .= "${path}/${thing}\n" } else { return "${path}/${thing}"; }
+		}
+	}
+	return $returnage;
+}
+
+sub init_test {
+	if( ! -d "./var" || ! -d "./usr" || ! -d "./etc" || ! -d "./tmp" || ! -d "./bin" || ! -d "./sbin" ) { return 0; } else { return 1; }
+}
+
+###
+my $ret;
+if($sw{file}) {
+	if( !init_test() ) { die("Chroot env does not exist in ".$ENV{PWD}.". Use -c to initalize it.\n"); }
+	if( ! -f $sw{file} ) {
+		print "$sw{file} doesn't exist.\n";
+		my $path = cb_which($sw{file},1);
+		print "Candidates:\n${path}" if $path;
+		exit;
+	}
+
+	print "Installing ".$sw{file}.":"; print "\n" if $sw{verbose};
+
+	$ident = "\t";
+	cb_install($sw{file});
+
+	print " Done\n";
+} elsif($sw{init}) {
+	print "Creating dir structure:"; print "\n" if $sw{verbose};
+	$ident = "\t";
+	foreach my $dir ( @{$struct{dirs}}) {
+		my $ldir = "./${dir}";
+		$ldir =~ s/\/\//\//g;
+		if( $sw{verbose} ) {
+			print "${ident} [C]-> ${ldir}\n"; } else { print '.'; }
+		cb_mkdir("./${dir}");
+	}
+	print " Done\n";
+
+	print "Installing files:"; print "\n" if $sw{verbose};
+	$ident = "\t";
+	cb_Binstall($struct{files});
+	print " Done\n";
+
+	print "Installing devices:"; print "\n" if $sw{verbose};
+	$ident = "\t";
+	cb_Binstall($struct{devices});
+	print " Done\n";
+
+	print "Installing binaries:"; print "\n" if $sw{verbose};
+	$ident = "\t";
+	foreach my $bin (@{$struct{binaries}}) {
+		my $binw = cb_which($bin);
+		if( $binw && $binw ne '' && -e $binw ) {
+			$ident = "\t";
+			cb_install($binw);
+		}
+	}
+	print " Done\n";
+
+} elsif($sw{package}) {
+	if( !init_test() ) { die("Chroot env does not exist in ".$ENV{PWD}."\n"); }
+	if( !exists($sw{ptype}) ) { die "You have to specify package type.\n"; }
+	my $COMMAND = undef;
+	if($sw{ptype} eq "rpm") {
+		my $ret = cb_which("rpm");
+		die("RPM based distro?\n") unless $ret;
+		$COMMAND = "${ret} -ql ${sw{package}} 2>&1";
+	} elsif($sw{ptype} eq "slack") {
+		my $ret = cb_which("find");
+		die("Slack??\n") unless $ret;
+		$COMMAND = "${ret} /var/log/packages -type f -name ${sw{package}}";
+	} elsif($sw{ptype} eq "gentoo") {
+		my $ret = cb_which("equery");
+		die("Gentoo?\n") unless $ret;
+		$COMMAND = "${ret} f ${sw{package}} 2>&1";
+	} elsif($sw{ptype} eq "debian") {
+		if( -e "/var/lib/dpkg/info/${sw{package}}.list" && -r "/var/lib/dpkg/info/${sw{package}}.list" ) {
+			print "Installing ${sw{package}}(${sw{ptype}}):\n";
+			my @plist;
+			open(PLIST,"<","/var/lib/dpkg/info/${sw{package}}.list") or die $!;
+			while(<PLIST>) {
+				push( @plist, $_ );
+			}
+			close(PLIST);
+			$ret = cb_Pinstall(\@plist);
+			if( $ret ) { print " Done\n"; } else { print " Failed\n"; }
+		} else {
+			print "Package ${sw{package}} doesn't exist.\n";
+		}
+	} else {
+		exit;
+	}
+	if( $COMMAND ) {
+		open(PLIST,"$COMMAND |") or die("Can't execute that! $!\n");
+		print "Installing ${sw{package}}(${sw{ptype}}):\n";
+		while(<PLIST>) {
+			next if m/^\[/;
+			die($_) if m/is not installed/;
+			die($_) if /^Package \S+ is not installed.$/;
+			chomp($_);
+			if(
+				$_ ne '' && $_ ne '/' && $_ ne '.' && $_ ne '/.' &&
+				$_ !~ m/\/doc\//i && $_ !~ m/\/docs\//i && $_ !~ m/\/man\//i
+			) {
+				if( -d $_ ) {
+					$ident = "\t";
+					cb_mkdir($_);
+				} else {
+					$ident = "\t";
+					cb_install($_);
+				}
+			}
+		}
+		close(PLIST);
+		print " Done\n";
+	}
+}

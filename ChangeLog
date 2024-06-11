@@ -1,0 +1,16 @@
+- 2.0.1 Fixed problems with libraries symbolic link
+- 2.0.2 (06.01.2005) Minor fixes
+- 2.0.3 (03.11.2005) Minor fixes
+- 2.0.4 (04.11.2005) Switched to GetOpt.
+- 2.0.5 (04.11.2005) added Gentoo portage support.
+- 2.0.6 (20.11.2006) added Debian packages support. Fixed missing files (localtime,protocols,tty).
+- 3.0rc1 (06.02.2007)
+	Rewriten engine.
+	Update/overwrite support.
+	Fixed directory permissions.
+	Fixed symlinks detection/usage.
+	Ubuntu packages support (basicaly Debian).
+- 3.0rc2 (22.02.2007)
+	Installation fixup
+	Minor process fixes
+- 3.0 (22.02.2007)
